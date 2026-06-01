@@ -1286,39 +1286,72 @@ class StiffenedPlateAnalysis:
                 con = constitutive.IsoShellConstitutive(mat, t=thickness)
 
             else:  # orthotropic
-                # assume G23, G13 = G12
-                G23 = material.G12 if material._G23 is None else material._G23
-                G13 = material.G12 if material._G13 is None else material._G13
-                ortho_prop = constitutive.MaterialProperties(
-                    E1=material.E11,
-                    E2=material.E22,
-                    nu12=material.nu12,
-                    G12=material.G12,
-                    G23=G23,
-                    G13=G13,
-                )
+                # if single ply we do this
+                # print(f"{len(material.ply_angles)=}")
+                if len(material.ply_angles) == 1 or len(material.ply_angles) == 2: # sym
+                    util = CompositeMaterialUtility(
+                        E11=material.E11, E22=material.E22, nu12=material.nu12, G12=material.G12
+                    ).rotate_ply(material._ply_angles[0])
+                    G12 = util.G12
+                    E11 = util.E11
+                    E22 = util.E22
+                    nu12 = util.nu12
+                    # print(f"{G12=} {E11=} {E22=} {nu12=}")
+
+
+                    # assume G23, G13 = G12
+                    G23 = G12
+                    G13 = G12
+
+                    # to prevent stiffener crippling, make stiffeners stronger in transverse shear
+                    # otherwise with composites, can dominate the modes (doesn't affect in-plane of stiffener, just trying this out)
+                    # does actually affect the eigenvalues.. don't do it
+                    # if "stiff" in compDescript:
+                    #     G23 *= 5
+                    #     G13 *= 5
+
+
+                    ortho_prop = constitutive.MaterialProperties(
+                        E1=util.E11,
+                        E2=util.E22,
+                        nu12=util.nu12,
+                        G12=util.G12,
+                        G23=G23,
+                        G13=G13,
+                    )
+
+                else:
+                    raise AssertionError("Doesn't support multi-ply laminate right now, needs verification.")
 
                 ortho_ply = constitutive.OrthotropicPly(thickness, ortho_prop)
 
                 # make sure it is a symmetric laminate by doing the symmetric number of plies
                 # right now assume it is symmetric
 
-                # how to make sure it is a symmetric laminate?
                 con = constitutive.CompositeShellConstitutive(
-                    [ortho_ply] * material.num_plies,
-                    np.array(material.get_ply_thicknesses(thickness), dtype=dtype),
-                    np.array(material.rad_ply_angles, dtype=dtype),
+                    [ortho_ply],
+                    np.array([thickness], dtype=dtype),
+                    np.array([0], dtype=dtype),
                     tOffset=0.0,
                 )
+
+                # how to make sure it is a symmetric laminate?
+                # con = constitutive.CompositeShellConstitutive(
+                #     [ortho_ply] * material.num_plies,
+                #     np.array(material.get_ply_thicknesses(thickness), dtype=dtype),
+                #     np.array(material.rad_ply_angles, dtype=dtype),
+                #     tOffset=0.0,
+                # )
 
             # For each element type in this component,
             # pass back the appropriate tacs element object
             elemList = []
             for descript in elemDescripts:
-                if ref_axis is None:
-                    transform = None
-                else:
-                    transform = elements.ShellRefAxisTransform(ref_axis)
+                # if ref_axis is None:
+                #     transform = None
+                # else:
+                #     transform = elements.ShellRefAxisTransform(ref_axis)
+                transform = None
                 if descript in ["CQUAD4", "CQUADR"]:
                     elem = elements.Quad4Shell(transform, con)
                 elif descript in ["CQUAD9", "CQUAD"]:
@@ -1533,6 +1566,8 @@ class StiffenedPlateAnalysis:
         w_middle = w[middle_plate_mask]
         w_middle_max = np.max(np.abs(w_middle))
         low_middle_deflection = w_middle_max / w_max < local_mode_tol
+
+        # print(f"local_mode check: {imode=} {w_middle_max=} {w_stiff_max=} {w_max=}", flush=True)
 
         
         if just_check_local:
@@ -1754,23 +1789,29 @@ class StiffenedPlateAnalysis:
             xi2 = self.nondim_X[:,0].astype(np.double)
             eta2 = self.nondim_X[:,1].astype(np.double)
             phi2 = self._eigenvectors[imode][2::6].astype(np.double) # w component
+            # print(f"{phi2.shape=}")
 
             # get meshgrid format of new mesh
-            xi2_unique = np.unique(np.round(xi2, 4))
-            eta2_unique = np.unique(np.round(eta2, 4))
+            xi2_unique = np.unique(np.round(xi2, 5))
+            eta2_unique = np.unique(np.round(eta2, 5))
             XI2, ETA2 = np.meshgrid(xi2_unique, eta2_unique)
             PHI2 = np.zeros(XI2.shape)
             nxi = XI2.shape[1]
             neta = XI2.shape[0]
+            # dxi = np.diff(xi2_unique)[0]
+            # deta = np.diff(eta2_unique)[0]
             for ixi in range(nxi):
                 for ieta in range(neta):
-                    mask = np.logical_and(
-                        np.abs(xi2 - xi2_unique[ixi]) < 0.03,
-                        np.abs(eta2 - eta2_unique[ieta]) < 0.03
-                    )
-                    # print(f"{mask=} {np.sum(mask)=} {mask.shape=}")
-                    phi2_val = phi2[mask][0]
-                    PHI2[ieta, ixi] = phi2_val
+                    # find the closest point to the unique xi value
+                    distances = (xi2 - xi2_unique[ixi])**2 + (eta2 - eta2_unique[ieta])**2
+                    ind = np.argmin(distances)
+                    # mask = np.logical_and(
+                    #     np.abs(xi2 - xi2_unique[ixi]) < 0.01,
+                    #     np.abs(eta2 - eta2_unique[ieta]) < 0.01
+                    # )
+                    # print(f"{dxi=} {deta=} {mask=} {np.sum(mask)=} {mask.shape=}")
+                    # phi2_val = phi2[mask][0]
+                    PHI2[ieta, ixi] = phi2[ind]
 
             # now interpolate phi1 onto new mesh
             PHI1_interp = interp(XI2, ETA2)
